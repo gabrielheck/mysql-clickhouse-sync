@@ -1,0 +1,41 @@
+services:
+  replicator:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      # MySQL Configuration
+      MYSQL_HOST: ${MYSQL_HOST}
+      MYSQL_PORT: ${MYSQL_PORT:-3306}
+      MYSQL_USER: ${MYSQL_USER}
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+      # ClickHouse Configuration
+      CLICKHOUSE_HOST: ${CLICKHOUSE_HOST}
+      CLICKHOUSE_PORT: ${CLICKHOUSE_PORT:-8123}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER:-default}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD:-}
+      CLICKHOUSE_DATABASE: ${CLICKHOUSE_DATABASE}
+      # Replication Configuration
+      REPLICATION_MODE: ${REPLICATION_MODE:-snapshot}
+      REPLICATION_BATCH_SIZE: ${REPLICATION_BATCH_SIZE:-50000}
+      REPLICATION_TABLES: ${REPLICATION_TABLES:-}
+      REPLICATION_DROP_EXISTING: ${REPLICATION_DROP_EXISTING:-false}
+      REPLICATION_PARALLEL_TABLES: ${REPLICATION_PARALLEL_TABLES:-1}
+      REPLICATION_POSITION_FILE: /data/binlog_position.json
+    volumes:
+      - replicator_data:/data
+    networks:
+      - replication-network
+    restart: unless-stopped
+
+networks:
+  replication-network:
+    driver: bridge
+
+volumes:
+  replicator_data:

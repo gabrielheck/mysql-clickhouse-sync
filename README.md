@@ -36,7 +36,7 @@ docker run --rm \
   -e CLICKHOUSE_PASSWORD=your-clickhouse-password \
   -e CLICKHOUSE_DATABASE=target_db \
   -e REPLICATION_MODE=snapshot \
-  muralha/mysql-clickhouse-sync:latest
+  gabrielheck/mysql-clickhouse-sync:latest
 ```
 
 ### CDC Mode (Real-time Replication)
@@ -58,7 +58,7 @@ docker run -d \
   -e CLICKHOUSE_PASSWORD=your-clickhouse-password \
   -e CLICKHOUSE_DATABASE=target_db \
   -e REPLICATION_MODE=cdc \
-  muralha/mysql-clickhouse-sync:latest
+  gabrielheck/mysql-clickhouse-sync:latest
 ```
 
 ### With Docker Network (Connecting to Other Containers)
@@ -83,7 +83,7 @@ docker run -d \
   -e CLICKHOUSE_PASSWORD=your-clickhouse-password \
   -e CLICKHOUSE_DATABASE=mydb \
   -e REPLICATION_MODE=cdc \
-  muralha/mysql-clickhouse-sync:latest
+  gabrielheck/mysql-clickhouse-sync:latest
 ```
 
 ### Replicate Specific Tables
@@ -103,7 +103,7 @@ docker run --rm \
   -e REPLICATION_MODE=snapshot \
   -e REPLICATION_TABLES=users,orders,products \
   -e REPLICATION_PARALLEL_TABLES=3 \
-  muralha/mysql-clickhouse-sync:latest
+  gabrielheck/mysql-clickhouse-sync:latest
 ```
 
 ### Using Docker Secrets (Recommended for Production)
@@ -131,7 +131,7 @@ chmod 600 ./secrets/*
 ```yaml
 services:
   replicator:
-    image: muralha/mysql-clickhouse-sync:latest
+    image: gabrielheck/mysql-clickhouse-sync:latest
     environment:
       # MySQL Configuration
       MYSQL_HOST: mysql-server
@@ -169,7 +169,7 @@ volumes:
 ```yaml
 services:
   replicator:
-    image: muralha/mysql-clickhouse-sync:latest
+    image: gabrielheck/mysql-clickhouse-sync:latest
     environment:
       MYSQL_HOST: mysql-server
       MYSQL_PORT: 3306
@@ -258,7 +258,7 @@ Create a `docker-compose.yml`:
 ```yaml
 services:
   replicator:
-    image: muralha/mysql-clickhouse-sync:latest
+    image: gabrielheck/mysql-clickhouse-sync:latest
     environment:
       # MySQL Configuration
       MYSQL_HOST: ${MYSQL_HOST}

@@ -1,3 +1,4 @@
+import re
 from typing import Any
 
 import clickhouse_connect
@@ -8,11 +9,34 @@ from src.config import ClickHouseConfig
 
 logger = structlog.get_logger()
 
+# Valid identifier pattern: alphanumeric and underscore only
+_VALID_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(name: str, context: str = "identifier") -> str:
+    """
+    Validate and sanitize SQL identifier to prevent injection.
+    
+    Raises ValueError if identifier contains invalid characters.
+    """
+    if not name:
+        raise ValueError(f"Empty {context} is not allowed")
+    
+    if not _VALID_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid {context} '{name}': must contain only alphanumeric characters and underscores, "
+            "and start with a letter or underscore"
+        )
+    
+    return name
+
 
 class ClickHouseClient:
     def __init__(self, config: ClickHouseConfig):
         self.config = config
         self._client: Client | None = None
+        # Validate database name at init time
+        _validate_identifier(config.database, "database name")
 
     def connect(self) -> None:
         self._client = clickhouse_connect.get_client(
@@ -37,20 +61,28 @@ class ClickHouseClient:
         return self._client
 
     def create_database(self) -> None:
-        self.client.command(f"CREATE DATABASE IF NOT EXISTS `{self.config.database}`")
-        logger.info("Database created/verified", database=self.config.database)
+        db = _validate_identifier(self.config.database, "database name")
+        self.client.command(f"CREATE DATABASE IF NOT EXISTS `{db}`")
+        logger.info("Database created/verified", database=db)
 
     def execute_command(self, sql: str) -> None:
         self.client.command(sql)
 
     def table_exists(self, table_name: str) -> bool:
+        table = _validate_identifier(table_name, "table name")
+        db = _validate_identifier(self.config.database, "database name")
+        
         result = self.client.query(
-            f"SELECT count() FROM system.tables WHERE database = '{self.config.database}' AND name = '{table_name}'"
+            "SELECT count() FROM system.tables WHERE database = {db:String} AND name = {table:String}",
+            parameters={"db": db, "table": table},
         )
         return result.first_row[0] > 0
 
     def get_row_count(self, table_name: str) -> int:
-        result = self.client.query(f"SELECT count() FROM `{self.config.database}`.`{table_name}`")
+        table = _validate_identifier(table_name, "table name")
+        db = _validate_identifier(self.config.database, "database name")
+        
+        result = self.client.query(f"SELECT count() FROM `{db}`.`{table}`")
         return result.first_row[0]
 
     def insert_data(self, table_name: str, columns: list[str], data: list[tuple]) -> int:
@@ -58,17 +90,26 @@ class ClickHouseClient:
         if not data:
             return 0
 
+        table = _validate_identifier(table_name, "table name")
+        db = _validate_identifier(self.config.database, "database name")
+        
+        # Validate all column names
+        validated_columns = [_validate_identifier(col, "column name") for col in columns]
+
         self.client.insert(
-            table=f"`{self.config.database}`.`{table_name}`",
+            table=f"`{db}`.`{table}`",
             data=data,
-            column_names=columns,
+            column_names=validated_columns,
         )
 
         return len(data)
 
     def truncate_table(self, table_name: str) -> None:
-        self.client.command(f"TRUNCATE TABLE `{self.config.database}`.`{table_name}`")
-        logger.info("Table truncated", table=table_name)
+        table = _validate_identifier(table_name, "table name")
+        db = _validate_identifier(self.config.database, "database name")
+        
+        self.client.command(f"TRUNCATE TABLE `{db}`.`{table}`")
+        logger.info("Table truncated", table=table)
 
     def __enter__(self) -> "ClickHouseClient":
         self.connect()

@@ -453,6 +453,142 @@ docker exec mysql-ch-sync rm /data/binlog_position.json
 docker restart mysql-ch-sync
 ```
 
+## Limitations & Performance
+
+### Performance Estimates
+
+| Metric | Estimate | Notes |
+|--------|----------|-------|
+| **CDC throughput** | ~1,000-5,000 events/sec | Single-threaded binlog processing |
+| **Snapshot throughput** | ~50,000-200,000 rows/sec | Depends on row size and network |
+| **Latency (CDC)** | 10-100ms | From MySQL commit to ClickHouse insert |
+| **Memory usage** | ~50-200 MB | Streaming with SSCursor, no full table buffering |
+
+**Factors affecting performance:**
+- Row size and number of columns
+- Network latency between MySQL, replicator, and ClickHouse
+- ClickHouse cluster load and insert queue
+- MySQL binlog event density
+
+**For high-throughput scenarios (>5,000 events/sec):**
+- Consider partitioning tables and running multiple replicators
+- Use dedicated MySQL replica for CDC to avoid impacting production
+- Ensure ClickHouse has sufficient insert capacity
+
+### CDC Limitations & Event Loss Scenarios
+
+The CDC replicator provides **at-least-once** delivery semantics. Below are scenarios where events may be lost or duplicated:
+
+| Scenario | Risk | Impact |
+|----------|------|--------|
+| **Normal operation** | None | Events processed, position saved every 5 seconds |
+| **Graceful shutdown (SIGTERM)** | None | Final position saved before exit |
+| **Crash / Kill -9** | Duplicates | May reprocess up to 5 seconds of events |
+| **ClickHouse unavailable** | **Loss** | Events lost if insert fails without retry |
+| **MySQL binlog expired** | **Loss** | Events permanently lost - requires full re-sync |
+| **Network partition** | **Loss** | Events during disconnect may be lost |
+| **Replicator offline > binlog retention** | **Loss** | Binlog purged before replicator catches up |
+| **DDL changes (ALTER TABLE)** | **Inconsistency** | Schema changes not automatically detected |
+
+### Why Duplicates Are Safe
+
+ClickHouse uses `ReplacingMergeTree` with `_version` column. When duplicates occur:
+- Same row with same `_version` → deduplicated automatically
+- Same row with different `_version` → latest version wins after OPTIMIZE or query with FINAL
+
+### Preventing Event Loss
+
+#### 1. Keep MySQL binlogs longer
+
+Configure MySQL retention to exceed your maximum expected downtime:
+
+```ini
+# my.cnf
+expire_logs_days = 7
+# or for MySQL 8.0+
+binlog_expire_logs_seconds = 604800  # 7 days
+```
+
+#### 2. Monitor replication lag
+
+Set up alerts if the replicator is offline or lagging:
+
+```bash
+# Check last sync time
+cat /data/binlog_position.json | jq '.timestamp'
+
+# Compare with current time - alert if > threshold
+LAST_SYNC=$(cat /data/binlog_position.json | jq -r '.timestamp')
+NOW=$(date +%s)
+LAG=$((NOW - ${LAST_SYNC%.*}))
+if [ $LAG -gt 3600 ]; then
+  echo "ALERT: Replication lag is ${LAG} seconds"
+fi
+```
+
+#### 3. Use persistent volumes
+
+Always mount `/data` to preserve binlog position across restarts:
+
+```bash
+docker run -v mysql_ch_sync_data:/data ...
+```
+
+#### 4. Implement external health checks
+
+Monitor the replicator container and restart if unhealthy:
+
+```yaml
+# docker-compose.yml
+services:
+  replicator:
+    image: gabrielheck/mysql-clickhouse-sync:latest
+    healthcheck:
+      test: ["CMD", "test", "-f", "/data/binlog_position.json"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+```
+
+#### 5. Periodic full re-sync (for critical data)
+
+For data that cannot tolerate any loss, schedule periodic full syncs:
+
+```bash
+# Weekly full re-sync (cron job)
+0 3 * * 0 docker exec mysql-ch-sync rm -f /data/binlog_position.json && docker restart mysql-ch-sync
+```
+
+### Recovery from Binlog Expiration
+
+If MySQL returns error "Could not find first log file name in binary log index file", the binlog has expired:
+
+```bash
+# 1. Stop the replicator
+docker stop mysql-ch-sync
+
+# 2. Remove position file to trigger full re-sync
+docker exec mysql-ch-sync rm /data/binlog_position.json
+
+# 3. Optionally, drop existing tables for clean slate
+# Set REPLICATION_DROP_EXISTING=true
+
+# 4. Restart - will do initial sync + resume CDC
+docker start mysql-ch-sync
+```
+
+### Known Limitations
+
+| Limitation | Description | Workaround |
+|------------|-------------|------------|
+| **No DDL replication** | Schema changes (ALTER, DROP) are not replicated | Manually apply DDL to ClickHouse |
+| **Single database** | Only one MySQL database per instance | Run multiple replicator instances |
+| **No retry on insert failure** | Failed ClickHouse inserts are not retried | Ensure ClickHouse availability |
+| **No GTID support** | Uses file+position, not GTID | Ensure binlog file naming is consistent |
+| **No filtering** | Cannot filter rows (WHERE clause) | Filter in ClickHouse views |
+| **UNSIGNED not detected** | UNSIGNED INT mapped to signed types | May overflow on large values |
+
 ## Architecture
 
 ```

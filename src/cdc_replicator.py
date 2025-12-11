@@ -74,6 +74,7 @@ class CDCReplicator:
             return None
 
     def _save_position(self, position: BinlogPosition) -> None:
+        self._position_file.parent.mkdir(parents=True, exist_ok=True)
         self._position_file.write_text(json.dumps(position.to_dict()))
 
     def _get_current_binlog_position(self) -> BinlogPosition:

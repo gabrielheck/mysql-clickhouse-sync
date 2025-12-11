@@ -1,3 +1,4 @@
+import re
 from dataclasses import dataclass
 from typing import Iterator, Any
 
@@ -8,6 +9,27 @@ import structlog
 from src.config import MySQLConfig
 
 logger = structlog.get_logger()
+
+# Valid identifier pattern: alphanumeric and underscore only
+_VALID_IDENTIFIER = re.compile(r"^[a-zA-Z_][a-zA-Z0-9_]*$")
+
+
+def _validate_identifier(name: str, context: str = "identifier") -> str:
+    """
+    Validate and sanitize SQL identifier to prevent injection.
+    
+    Raises ValueError if identifier contains invalid characters.
+    """
+    if not name:
+        raise ValueError(f"Empty {context} is not allowed")
+    
+    if not _VALID_IDENTIFIER.match(name):
+        raise ValueError(
+            f"Invalid {context} '{name}': must contain only alphanumeric characters and underscores, "
+            "and start with a letter or underscore"
+        )
+    
+    return name
 
 
 @dataclass
@@ -33,6 +55,8 @@ class MySQLClient:
     def __init__(self, config: MySQLConfig):
         self.config = config
         self._connection: pymysql.Connection | None = None
+        # Validate database name at init time
+        _validate_identifier(config.database, "database name")
 
     def connect(self) -> None:
         self._connection = pymysql.connect(
@@ -106,8 +130,10 @@ class MySQLClient:
         return TableSchema(name=table_name, columns=columns, primary_keys=primary_keys)
 
     def get_row_count(self, table_name: str) -> int:
+        table = _validate_identifier(table_name, "table name")
+        
         with self.connection.cursor() as cursor:
-            cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table_name}`")
+            cursor.execute(f"SELECT COUNT(*) as cnt FROM `{table}`")
             result = cursor.fetchone()
             return result["cnt"] if result else 0
 
@@ -115,11 +141,14 @@ class MySQLClient:
         self, table_name: str, batch_size: int, columns: list[str]
     ) -> Iterator[list[tuple]]:
         """Fetch data using SSCursor for memory-efficient streaming."""
-        column_list = ", ".join(f"`{col}`" for col in columns)
+        table = _validate_identifier(table_name, "table name")
+        validated_columns = [_validate_identifier(col, "column name") for col in columns]
+        
+        column_list = ", ".join(f"`{col}`" for col in validated_columns)
 
         # Use SSDictCursor for server-side streaming (doesn't buffer all rows)
         with self.connection.cursor(pymysql.cursors.SSDictCursor) as cursor:
-            cursor.execute(f"SELECT {column_list} FROM `{table_name}`")
+            cursor.execute(f"SELECT {column_list} FROM `{table}`")
 
             batch = []
             for row in cursor:

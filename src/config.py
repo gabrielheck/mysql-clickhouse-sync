@@ -1,7 +1,17 @@
+import os
 from enum import Enum
+from pathlib import Path
 
 from pydantic_settings import BaseSettings
-from pydantic import Field
+from pydantic import Field, model_validator
+
+
+def read_secret_file(file_path: str) -> str:
+    """Read content from a Docker secret file."""
+    path = Path(file_path)
+    if path.exists():
+        return path.read_text().strip()
+    return ""
 
 
 class ReplicationMode(str, Enum):
@@ -13,12 +23,23 @@ class MySQLConfig(BaseSettings):
     host: str = Field(alias="MYSQL_HOST")
     port: int = Field(default=3306, alias="MYSQL_PORT")
     user: str = Field(alias="MYSQL_USER")
-    password: str = Field(alias="MYSQL_PASSWORD")
+    password: str = Field(default="", alias="MYSQL_PASSWORD")
     database: str = Field(alias="MYSQL_DATABASE")
 
     class Config:
         env_prefix = ""
         extra = "ignore"
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_secrets(cls, values: dict) -> dict:
+        """Load passwords from Docker secret files if *_FILE env vars are set."""
+        password_file = os.environ.get("MYSQL_PASSWORD_FILE")
+        if password_file:
+            secret_value = read_secret_file(password_file)
+            if secret_value:
+                values["MYSQL_PASSWORD"] = secret_value
+        return values
 
 
 class ClickHouseConfig(BaseSettings):
@@ -31,6 +52,17 @@ class ClickHouseConfig(BaseSettings):
     class Config:
         env_prefix = ""
         extra = "ignore"
+
+    @model_validator(mode="before")
+    @classmethod
+    def load_secrets(cls, values: dict) -> dict:
+        """Load passwords from Docker secret files if *_FILE env vars are set."""
+        password_file = os.environ.get("CLICKHOUSE_PASSWORD_FILE")
+        if password_file:
+            secret_value = read_secret_file(password_file)
+            if secret_value:
+                values["CLICKHOUSE_PASSWORD"] = secret_value
+        return values
 
 
 class ReplicationConfig(BaseSettings):
@@ -63,4 +95,3 @@ class Settings(BaseSettings):
 
 def get_settings() -> Settings:
     return Settings()
-

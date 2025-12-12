@@ -129,7 +129,20 @@ class CDCReplicator:
             kwargs["log_file"] = position.file
             kwargs["log_pos"] = position.position
 
-        return BinLogStreamReader(**kwargs)
+        try:
+            return BinLogStreamReader(**kwargs)
+        except TypeError as e:
+            # Backward compatibility with older mysql-replication versions that
+            # don't support heartbeat_interval.
+            if "heartbeat_interval" in str(e):
+                kwargs.pop("heartbeat_interval", None)
+                logger.warning(
+                    "BinLogStreamReader does not support heartbeat_interval; "
+                    "continuing without heartbeat",
+                    error=str(e),
+                )
+                return BinLogStreamReader(**kwargs)
+            raise
 
     def _get_version_timestamp(self) -> int:
         return int(datetime.now().timestamp() * 1000000)

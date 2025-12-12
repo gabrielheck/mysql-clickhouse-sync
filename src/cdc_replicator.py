@@ -4,6 +4,7 @@ from pathlib import Path
 from dataclasses import dataclass, asdict
 from datetime import datetime
 
+import pymysql
 from pymysqlreplication import BinLogStreamReader
 from pymysqlreplication.row_event import (
     WriteRowsEvent,
@@ -59,7 +60,7 @@ class CDCReplicator:
             settings.replication.position_file or "/tmp/binlog_position.json"
         )
         self._tables_to_replicate: set[str] = set()
-        self._table_schemas: dict[str, list[str]] = {}  # Cache: table -> column names
+        self._table_schemas: dict[str, list[str]] = {}  # Cache: table -> column names.
 
     def _load_position(self) -> BinlogPosition | None:
         if not self._position_file.exists():
@@ -67,7 +68,11 @@ class CDCReplicator:
         try:
             data = json.loads(self._position_file.read_text())
             pos = BinlogPosition.from_dict(data)
-            logger.info("Loaded binlog position", file=pos.file, position=pos.position)
+            logger.info(
+                "Loaded binlog position",
+                file=pos.file,
+                position=pos.position,
+            )
             return pos
         except Exception as e:
             logger.warning("Failed to load position", error=str(e))
@@ -82,7 +87,9 @@ class CDCReplicator:
             cursor.execute("SHOW MASTER STATUS")
             row = cursor.fetchone()
             if not row:
-                raise RuntimeError("Cannot get binlog position. Is binlog enabled?")
+                raise RuntimeError(
+                    "Cannot get binlog position. Is binlog enabled?"
+                )
             return BinlogPosition(
                 file=row["File"],
                 position=row["Position"],
@@ -97,6 +104,9 @@ class CDCReplicator:
             "port": self.settings.mysql.port,
             "user": self.settings.mysql.user,
             "passwd": self.settings.mysql.password,
+            "connect_timeout": 10,
+            "read_timeout": 300,
+            "write_timeout": 300,
         }
 
         kwargs = {
@@ -106,6 +116,10 @@ class CDCReplicator:
             "resume_stream": position is not None,
             "only_events": [WriteRowsEvent, UpdateRowsEvent, DeleteRowsEvent],
             "only_schemas": [self.settings.mysql.database],
+            # Keep the binlog connection alive to avoid idle disconnects.
+            # This reduces OperationalError reconnect warnings from
+            # pymysql/mysql-replication.
+            "heartbeat_interval": 5,
         }
 
         if self._tables_to_replicate:
@@ -192,7 +206,9 @@ class CDCReplicator:
             schema = self.mysql.get_table_schema(table_name)
 
             # Cache column names for CDC event processing
-            self._table_schemas[table_name] = [col.name for col in schema.columns]
+            self._table_schemas[table_name] = [
+                col.name for col in schema.columns
+            ]
 
             if self.settings.replication.drop_existing:
                 drop_sql = self.converter.generate_drop_table(
@@ -208,8 +224,6 @@ class CDCReplicator:
 
     def initial_sync(self) -> None:
         """Perform initial full sync before starting CDC."""
-        from src.replicator import Replicator
-
         logger.info("Starting initial sync")
 
         # Get current binlog position BEFORE sync
@@ -288,63 +302,100 @@ class CDCReplicator:
             position=position.position if position else 0,
         )
 
-        self._stream = self._create_binlog_stream(position)
-
         events_processed = 0
         last_save_time = time.time()
 
-        try:
-            for event in self._stream:
-                table = event.table
+        reconnect_delay_seconds = 1.0
+        max_reconnect_delay_seconds = 30.0
+        stopping = False
 
-                if table not in self._tables_to_replicate:
-                    continue
+        while not stopping:
+            self._stream = self._create_binlog_stream(position)
 
-                if isinstance(event, WriteRowsEvent):
-                    count = self._process_write_event(event)
-                    logger.debug("INSERT", table=table, rows=count)
-                elif isinstance(event, UpdateRowsEvent):
-                    count = self._process_update_event(event)
-                    logger.debug("UPDATE", table=table, rows=count)
-                elif isinstance(event, DeleteRowsEvent):
-                    count = self._process_delete_event(event)
-                    logger.debug("DELETE", table=table, rows=count)
+            try:
+                for event in self._stream:
+                    table = event.table
 
-                events_processed += 1
+                    if table not in self._tables_to_replicate:
+                        continue
 
-                # Save position periodically (every 5 seconds)
-                if time.time() - last_save_time > 5:
-                    pos = BinlogPosition(
-                        file=self._stream.log_file,
-                        position=self._stream.log_pos,
-                        timestamp=time.time(),
-                    )
-                    self._save_position(pos)
-                    last_save_time = time.time()
+                    if isinstance(event, WriteRowsEvent):
+                        count = self._process_write_event(event)
+                        logger.debug("INSERT", table=table, rows=count)
+                    elif isinstance(event, UpdateRowsEvent):
+                        count = self._process_update_event(event)
+                        logger.debug("UPDATE", table=table, rows=count)
+                    elif isinstance(event, DeleteRowsEvent):
+                        count = self._process_delete_event(event)
+                        logger.debug("DELETE", table=table, rows=count)
 
-                    if events_processed % 100 == 0:
-                        logger.info(
-                            "CDC progress",
-                            events=events_processed,
-                            binlog_file=pos.file,
-                            binlog_pos=pos.position,
+                    events_processed += 1
+
+                    # Save position periodically (every 5 seconds)
+                    if time.time() - last_save_time > 5:
+                        pos = BinlogPosition(
+                            file=self._stream.log_file,
+                            position=self._stream.log_pos,
+                            timestamp=time.time(),
+                        )
+                        self._save_position(pos)
+                        position = pos
+                        last_save_time = time.time()
+
+                        if events_processed % 100 == 0:
+                            logger.info(
+                                "CDC progress",
+                                events=events_processed,
+                                binlog_file=pos.file,
+                                binlog_pos=pos.position,
+                            )
+
+            except KeyboardInterrupt:
+                logger.info("CDC stopped by user")
+                stopping = True
+            except (pymysql.err.OperationalError, OSError) as e:
+                # MySQL connection dropped (e.g., network blip, idle timeout, MySQL restart).
+                # We reconnect from the last known binlog position.
+                logger.warning(
+                    "Binlog stream disconnected; will reconnect",
+                    error=str(e),
+                    reconnect_delay_seconds=reconnect_delay_seconds,
+                )
+            except Exception as e:
+                logger.exception("CDC replication failed", error=str(e))
+                raise
+            finally:
+                if self._stream:
+                    # Best-effort: persist last known position before closing.
+                    try:
+                        pos = BinlogPosition(
+                            file=self._stream.log_file,
+                            position=self._stream.log_pos,
+                            timestamp=time.time(),
+                        )
+                        self._save_position(pos)
+                        position = pos
+                    except Exception as e:
+                        logger.warning(
+                            "Failed to persist binlog position during cleanup",
+                            error=str(e),
                         )
 
-        except KeyboardInterrupt:
-            logger.info("CDC stopped by user")
-        finally:
-            if self._stream:
-                # Save final position
-                pos = BinlogPosition(
-                    file=self._stream.log_file,
-                    position=self._stream.log_pos,
-                    timestamp=time.time(),
-                )
-                self._save_position(pos)
-                self._stream.close()
+                    try:
+                        self._stream.close()
+                    finally:
+                        self._stream = None
+
+            if stopping:
                 logger.info(
                     "CDC stopped",
                     events_processed=events_processed,
-                    final_position=pos.position,
+                    final_position=position.position if position else None,
                 )
+                break
 
+            # Backoff before reconnecting.
+            time.sleep(reconnect_delay_seconds)
+            reconnect_delay_seconds = min(
+                max_reconnect_delay_seconds, reconnect_delay_seconds * 2
+            )

@@ -157,3 +157,5 @@ def mock_clickhouse_client():
         mock_client = MagicMock()
         mock_get_client.return_value = mock_client
         yield mock_client
+
+

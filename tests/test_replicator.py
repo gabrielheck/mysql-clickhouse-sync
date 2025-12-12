@@ -225,3 +225,5 @@ class TestReplicatorConfig:
         result = settings.replication.get_tables_list()
 
         assert result == []
+
+

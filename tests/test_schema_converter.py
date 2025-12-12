@@ -287,3 +287,5 @@ class TestTypeMapCompleteness:
 
         for mysql_type in expected_types:
             assert mysql_type in MYSQL_TO_CLICKHOUSE_TYPE_MAP, f"Missing mapping for {mysql_type}"
+
+

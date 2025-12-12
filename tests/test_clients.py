@@ -291,3 +291,5 @@ class TestClickHouseClient:
         # Should work with valid database name
         client.create_database()
         mock_clickhouse_client.command.assert_called_once()
+
+

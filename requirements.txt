@@ -1,4 +1,4 @@
-pymysql==1.1.0
+pymysql==1.1.1
 cryptography==42.0.0
 mysql-replication==1.0.8
 clickhouse-connect==0.7.19
